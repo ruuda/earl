@@ -1,0 +1,4 @@
+resolver: nightly-2016-08-21
+
+packages:
+  - '.'
