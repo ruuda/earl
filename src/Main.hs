@@ -8,11 +8,40 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Data.Text (Text)
-import Network.HTTP.Types (ok200, notFound404)
-import Network.HTTP.Types.Header (hContentType)
+import Network.HTTP.Types (ok200, movedPermanently301, notFound404)
+import Network.HTTP.Types.Header (hContentType, hLocation)
 import Network.Wai (Application, responseLBS, pathInfo)
 
+import qualified Data.ByteString
+import qualified Data.ByteString.Lazy
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding
+import qualified Data.Text.Lazy
+import qualified Data.Text.Lazy.Encoding
 import qualified Network.Wai.Handler.Warp as Warp
+
+-- Strings in Haskell are madness. For url pieces, we get a strict Text. For
+-- the response body, we must provide a lazy ByteString, but for the headers a
+-- strict ByteString. To alleviate the pain a bit, work with stict Text
+-- internally everywhere, and use the two functions below to convert to the
+-- required type.
+
+encodeUtf8Lazy :: Text -> Data.ByteString.Lazy.ByteString
+encodeUtf8Lazy = Data.Text.Lazy.Encoding.encodeUtf8 . Data.Text.Lazy.fromStrict
+
+encodeUtf8Strict :: Text -> Data.ByteString.ByteString
+encodeUtf8Strict = Data.Text.Encoding.encodeUtf8
+
+serveRedirect :: Text -> Application
+serveRedirect newUrl request f =
+  let
+    body = Text.append "-> " newUrl
+    headers =
+      [ (hLocation, encodeUtf8Strict newUrl)
+      , (hContentType, "text/plain")
+      ]
+  in
+    f $ responseLBS movedPermanently301 headers (encodeUtf8Lazy body)
 
 -- Define the urls.
 router :: Application
@@ -23,10 +52,10 @@ router request = case pathInfo request of
 
 -- Serves the GitHub repository redirect.
 serveRepo :: Text -> Application
-serveRepo request args f =
-  f $ responseLBS ok200 [(hContentType, "text/plain")] "should redirect to repository"
+serveRepo repo =
+  serveRedirect $ Text.append "https://github.com/ruuda/" repo
 
--- Serves the GitHub repository redirect.
+-- Serves main page.
 serveIndex :: Application
 serveIndex request f =
   f $ responseLBS ok200 [(hContentType, "text/plain")] "hi"
