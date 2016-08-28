@@ -7,18 +7,24 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 
+import Control.Lens (view)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
+import Data.Vector (toList)
 import Network.HTTP.Types (ok200, movedPermanently301, notFound404)
 import Network.HTTP.Types.Header (hContentType, hLocation)
 import Network.Wai (Application, responseLBS, pathInfo)
 
+import qualified Control.Concurrent.Async as Async
 import qualified Data.ByteString
 import qualified Data.ByteString.Lazy
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding
 import qualified Data.Text.Lazy
 import qualified Data.Text.Lazy.Encoding
+import qualified GitHub.Endpoints.Repos as Github
 import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wreq as Wreq
 
 -- Strings in Haskell are madness. For url pieces, we get a strict Text. For
 -- the response body, we must provide a lazy ByteString, but for the headers a
@@ -42,6 +48,29 @@ serveRedirect newUrl request f =
       ]
   in
     f $ responseLBS movedPermanently301 headers (encodeUtf8Lazy body)
+
+-- Returns a list of all GitHub repositories for the user "ruuda". (Note:
+-- without authentication, this is rate-limited heavily.) Returns urls like
+-- https://github.com/ruuda/repo-name.
+getGithubRepos :: IO [Text]
+getGithubRepos = do
+  response <- Github.userRepos "ruuda" Github.RepoPublicityAll
+  case response of
+    Left _error -> return []
+    Right repos -> return $ fmap Github.repoHtmlUrl $ toList repos
+
+-- Given a list of urls, returns the sublist of urls that serve 200 ok.
+probeUrlsExist :: [Text] -> IO [Text]
+probeUrlsExist urls =
+  let
+    probeUrl url = do
+      response <- Wreq.get $ Text.unpack url
+      if (view Wreq.responseStatus response) == ok200 then
+        return $ Just url
+      else
+        return Nothing
+  in
+    catMaybes <$> Async.mapConcurrently probeUrl urls
 
 -- Define the urls.
 router :: Application
