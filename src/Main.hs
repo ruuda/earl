@@ -13,7 +13,7 @@ import Data.Text (Text)
 import Data.Vector (toList)
 import Network.HTTP.Types (ok200, movedPermanently301, notFound404)
 import Network.HTTP.Types.Header (hContentType, hLocation)
-import Network.Wai (Application, responseLBS, pathInfo)
+import Network.Wai (Application, Response, responseLBS, pathInfo)
 
 import qualified Control.Concurrent.Async as Async
 import qualified Data.ByteString
@@ -25,6 +25,7 @@ import qualified Data.Text.Lazy.Encoding
 import qualified GitHub.Endpoints.Repos as Github
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wreq as Wreq
+import qualified Network.Wreq.Types as WreqTypes
 
 -- Strings in Haskell are madness. For url pieces, we get a strict Text. For
 -- the response body, we must provide a lazy ByteString, but for the headers a
@@ -38,8 +39,9 @@ encodeUtf8Lazy = Data.Text.Lazy.Encoding.encodeUtf8 . Data.Text.Lazy.fromStrict
 encodeUtf8Strict :: Text -> Data.ByteString.ByteString
 encodeUtf8Strict = Data.Text.Encoding.encodeUtf8
 
-serveRedirect :: Text -> Application
-serveRedirect newUrl request f =
+-- Generates a response that redirects to the given url.
+responseRedirect :: Text -> Response
+responseRedirect newUrl =
   let
     body = Text.append "-> " newUrl
     headers =
@@ -47,7 +49,10 @@ serveRedirect newUrl request f =
       , (hContentType, "text/plain")
       ]
   in
-    f $ responseLBS movedPermanently301 headers (encodeUtf8Lazy body)
+    responseLBS movedPermanently301 headers (encodeUtf8Lazy body)
+
+serveRedirect :: Text -> Application
+serveRedirect newUrl _request respond = respond $ responseRedirect newUrl
 
 -- Returns a list of all GitHub repositories for the user "ruuda". (Note:
 -- without authentication, this is rate-limited heavily.) Returns urls like
@@ -59,40 +64,64 @@ getGithubRepos = do
     Left _error -> return []
     Right repos -> return $ fmap Github.repoHtmlUrl $ toList repos
 
+-- The normal Wreq.get function throws when the response is a 404, which is not
+-- what we want. The solution is to use custom options, with the 'checkStatus'
+-- function set to one that does not throw for non-200 statuses.
+noThrowOptions :: Wreq.Options
+noThrowOptions = Wreq.defaults { WreqTypes.checkStatus = Just ignoreStatus }
+  where
+    ignoreStatus _ _ _ = Nothing
+
 -- Given a list of urls, returns the sublist of urls that serve 200 ok.
 probeUrlsExist :: [Text] -> IO [Text]
 probeUrlsExist urls =
   let
     probeUrl url = do
-      response <- Wreq.get $ Text.unpack url
+      response <- Wreq.getWith noThrowOptions $ Text.unpack url
       if (view Wreq.responseStatus response) == ok200 then
         return $ Just url
       else
         return Nothing
   in
+    -- TODO: Return first repository that matches, don't wait for the others
+    -- because it is too slow. Also, sort list of repositories by activity date
+    -- to increase the probability of a hit?
     catMaybes <$> Async.mapConcurrently probeUrl urls
 
 -- Define the urls.
 router :: Application
 router request = case pathInfo request of
-  "repo" : args : [] -> serveRepo args request
-  []                 -> serveIndex request
-  _otherPath         -> serveNotFound request
+  "commit" : arg : [] -> serveCommit arg request
+  "repo" : arg : [] -> serveRepo arg request
+  [] -> serveIndex request
+  _ -> serveNotFound request
 
 -- Serves the GitHub repository redirect.
 serveRepo :: Text -> Application
 serveRepo repo =
   serveRedirect $ Text.append "https://github.com/ruuda/" repo
 
+-- Probes all repositories for the given commit, then redirects to the page
+-- for the commit if it was found, or serves a "not found" page.
+serveCommit :: Text -> Application
+serveCommit commit _request respond = do
+  repoUrls <- getGithubRepos
+  -- TODO: This should probe the API, in order for private repos to be included.
+  let commitUrls = fmap (\ url -> Text.concat [url, "/commit/", commit]) repoUrls
+  goodUrls <- probeUrlsExist commitUrls
+  case goodUrls of
+    [] -> respond $ responseLBS notFound404 [(hContentType, "text/plain")] "commit not found"
+    commitUrl : _ -> respond $ responseRedirect commitUrl
+
 -- Serves main page.
 serveIndex :: Application
-serveIndex request f =
-  f $ responseLBS ok200 [(hContentType, "text/plain")] "hi"
+serveIndex request respond =
+  respond $ responseLBS ok200 [(hContentType, "text/plain")] "hi"
 
 -- Fallback if no route matched.
 serveNotFound :: Application
-serveNotFound request f =
-  f $ responseLBS notFound404 [(hContentType, "text/plain")] "not found"
+serveNotFound request respond =
+  respond $ responseLBS notFound404 [(hContentType, "text/plain")] "not found"
 
 -- Runs the webserver at the specified port.
 runServer :: Int -> IO ()
